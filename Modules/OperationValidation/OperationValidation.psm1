@@ -68,15 +68,37 @@ function new-OperationValidationInfo
 
 function Get-TestFromScript
 {
-    param ( [string]$scriptPath )
+    param (
+        [parameter(Mandatory)]
+        [string]$ScriptPath,
+
+        [string[]]$Tag,
+
+        [string[]]$ExcludeTag
+
+    )
+
+    $results = @()
+
     $errs = $null
-    $tok =[System.Management.Automation.PSParser]::Tokenize((get-content -read 0 -Path $scriptPath), [ref]$Errs)
+    $tok =[System.Management.Automation.PSParser]::Tokenize((get-content -read 0 -Path $ScriptPath), [ref]$Errs)
 
     for($i = 0; $i -lt $tok.count; $i++) {
         if ( $tok[$i].type -eq "Command" -and $tok[$i].content -eq "Describe" )
         {
             $i++
-            if ( $tok[$i].Type -eq "String" ) { $tok[$i].Content }
+            if ( $tok[$i].Type -eq "String" )
+            {
+                # We found the test name
+                                
+                $result = @{
+                    TestName = $tok[$i].Content
+                    Tags = @()
+                    ExcludedTags = @()
+                }
+            
+                $results += $result
+            }
             else
             {
                 # ok - we didn't get the describe text first,
@@ -87,11 +109,16 @@ function Get-TestFromScript
                     $i++
                 }
                 $i--
-                $tok[$i].Content
+                $result = @{
+                    TestName = $tok[$i].Content
+                    Tags = @()
+                    ExcludedTags = @()
+                }                
             }
         }
     }
 
+    $results
 }
 <#
 .SYNOPSIS
@@ -325,7 +352,7 @@ param (
                             Write-Debug -Message "`n$($parameters.Keys | Out-String)"
                         }
 
-                        $testNames = @(Get-TestFromScript -scriptPath $file.FullName)
+                        $testNames = @(Get-TestFromScript -ScriptPath $file.FullName)
                         foreach ($testName in $testNames) {
                             $modInfoParams = @{
                                 FilePath = $file.Fullname
@@ -439,7 +466,9 @@ function Invoke-OperationValidation
         [Parameter()][Version]$Version,
         [Parameter(ParameterSetName="FileAndTest")]
         [Parameter(ParameterSetName="UseGetOperationTest")]
-        [Parameter()][hashtable]$Overrides
+        [Parameter()][hashtable]$Overrides,        
+        [Parameter()][string[]]$Tag,
+        [Parameter()][string[]]$ExcludeTag
         )
     BEGIN
     {
@@ -520,6 +549,16 @@ function Invoke-OperationValidation
                 else
                 {
                     $pesterParams.Path = $ti.FilePath
+                }
+
+                if ($PSBoundParameters.ContainsKey('Tag'))
+                {
+                    $pesterParams.Tag = $Tag
+                }
+
+                if ($PSBoundParameters.ContainsKey('ExcludeTag'))
+                {
+                    $pesterParams.ExcludeTag = $ExcludeTag
                 }
 
                 if ( $PSCmdlet.ShouldProcess("$($ti.Name) [$($ti.FilePath)]"))
