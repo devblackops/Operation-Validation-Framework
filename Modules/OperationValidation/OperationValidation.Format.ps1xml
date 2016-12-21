@@ -68,6 +68,17 @@
         </CustomItem>
        </Frame>
 
+       <Text>Tags:     </Text>
+       <Frame>
+        <LeftIndent>4</LeftIndent>
+        <CustomItem>
+         <ExpressionBinding>
+          <PropertyName>Tags</PropertyName>
+         </ExpressionBinding>
+         <NewLine/>
+        </CustomItem>
+       </Frame>
+
        <Text>File:     </Text>
        <Frame>
         <LeftIndent>4</LeftIndent>
