@@ -45,7 +45,8 @@ function new-OperationValidationInfo
         [Parameter(Mandatory=$true)][string[]]$Name,
         [Parameter()][string[]]$TestCases,
         [Parameter(Mandatory=$true)][ValidateSet("None","Simple","Comprehensive")][string]$Type,
-        [Parameter()][string]$modulename,
+        [Parameter()][string]$Modulename,
+        [Parameter()][string[]]$Tags,
         [Parameter()][Version]$Version,
         [Parameter()][hashtable]$Parameters
         )
@@ -55,7 +56,8 @@ function new-OperationValidationInfo
         Name = $Name
         TestCases = $testCases
         Type = $type
-        ModuleName = $modulename
+        ModuleName = $Modulename
+        Tags = $Tags
         Version = $Version
         ScriptParameters = $Parameters
     }
@@ -70,55 +72,51 @@ function Get-TestFromScript
 {
     param (
         [parameter(Mandatory)]
-        [string]$ScriptPath,
-
-        [string[]]$Tag,
-
-        [string[]]$ExcludeTag
-
+        [string]$ScriptPath
     )
 
-    $results = @()
+    $text = Get-Content -Path $ScriptPath -Raw
+    $tokens = $null
+    $errors = $null
+    $describes = [Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors).
+       FindAll([Func[Management.Automation.Language.Ast,bool]]{
+            param ($ast)
+            $ast.CommandElements -and
+            $ast.CommandElements[0].Value -eq 'describe'
+        }, $true) |
+        ForEach-Object {
+            $CE = $_.CommandElements
 
-    $errs = $null
-    $tok =[System.Management.Automation.PSParser]::Tokenize((get-content -read 0 -Path $ScriptPath), [ref]$Errs)
+            # This is the name of the 'describe' block
+            $secondString = ($CE | where { $_.StaticType.name -eq 'string' })[1].SafeGetValue()
 
-    for($i = 0; $i -lt $tok.count; $i++) {
-        if ( $tok[$i].type -eq "Command" -and $tok[$i].content -eq "Describe" )
-        {
-            $i++
-            if ( $tok[$i].Type -eq "String" )
-            {
-                # We found the test name
-                                
-                $result = @{
-                    TestName = $tok[$i].Content
-                    Tags = @()
-                    ExcludedTags = @()
-                }
-            
-                $results += $result
+            $item = [PSCustomObject][ordered]@{
+                Name = $secondString
+                Tags = @()
             }
-            else
-            {
-                # ok - we didn't get the describe text first,
-                # we likely saw a "-Tags" statement, so that means that
-                # the describe text will immediately preceed the scriptblock
-                while($tok[$i].Type -ne "GroupStart")
-                {
-                    $i++
+
+            # Get any tags defined
+            $tagIdx = $CE.IndexOf(($CE | where ParameterName -eq 'Tag')) + 1
+            if ($tagIdx -and $tagIdx -lt $CE.Count) {
+                $tagExtent = $CE[$tagIdx].Extent
+
+                $tagAST = [System.Management.Automation.Language.Parser]::ParseInput($tagExtent, [ref]$null, [ref]$null)
+
+                # Try to get the tags as an array
+                $tagElements = $tagAST.FindAll({$args[0] -is [System.Management.Automation.Language.ArrayLiteralAst]}, $true)
+                if ($tagElements) {
+                    $item.Tags = $tagElements.SafeGetValue()
+                } else {
+                    # Try to get the tag as a string
+                    $tagElements = $tagAST.FindAll({$args[0] -is [System.Management.Automation.Language.StringConstantExpressionAst]}, $true)
+                    if ($tagElements) {
+                        $item.Tags = @($tagElements.SafeGetValue())
+                    }
                 }
-                $i--
-                $result = @{
-                    TestName = $tok[$i].Content
-                    Tags = @()
-                    ExcludedTags = @()
-                }                
             }
+            $item
         }
-    }
-
-    $results
+    $describes
 }
 <#
 .SYNOPSIS
@@ -153,6 +151,20 @@ or Both ("Simple,Comprehensive"). "Simple,Comprehensive" is the default.
 The version of the module to retrieve. If the specified, the latest version
 of the module will be retured.
 
+.PARAMETER Tag
+Executes tests with specified tag parameter values. Wildcard characters and tag values that include spaces
+or whitespace characters are not supported.
+
+When you specify multiple tag values, Get-OperationValidation executes tests that have any of the
+listed tags. If you use both Tag and ExcludeTag, ExcludeTag takes precedence.
+
+.PARAMETER ExcludeTag
+Omits tests with the specified tag parameter values. Wildcard characters and tag values that include spaces
+or whitespace characters are not supported.
+
+When you specify multiple ExcludeTag values, Get-OperationValidation omits tests that have any
+of the listed tags. If you use both Tag and ExcludeTag, ExcludeTag takes precedence.
+
 .EXAMPLE
 PS> Get-OperationValidation -ModuleName C:\temp\modules\AddNumbers
 
@@ -181,13 +193,13 @@ function Get-OperationValidation
 param (
     [Parameter(Position=0)][string[]]$ModuleName = "*",
     [Parameter()][ValidateSet("Simple","Comprehensive")][string[]]$TestType =  @("Simple","Comprehensive"),
-    [Parameter()][Version]$Version
+    [Parameter()][Version]$Version,
+    [Parameter()][string[]]$Tag,
+    [Parameter()][string[]]$ExcludeTag
     )
 
     BEGIN
     {
-
-        #$testTypes = $type.Tostring().Replace(" ","").split(",")
         function Get-TestName ( $ast )
         {
             for($i = 1; $i -lt $ast.Parent.CommandElements.Count; $i++)
@@ -272,16 +284,16 @@ param (
                                 # Get latest version if no specific version specified
                                 if ($PSBoundParameters.ContainsKey('Version'))
                                 {
-                                    $versionDirectories = Get-Childitem -path $modDir.FullName -dir |
+                                    $versionDirectories = Get-Childitem -Path $modDir.FullName -Directory |
                                         where-object { $_.name -as [version] -and $_.Name -eq $Version }
                                 }
                                 else
                                 {
-                                    $versionDirectories = Get-Childitem -path $modDir.FullName -dir |
+                                    $versionDirectories = Get-Childitem -Path $modDir.FullName -Directory |
                                         where-object { $_.name -as [version] }
                                 }
 
-                                $potentialDiagnostics = $versionDirectories | where-object {
+                                $potentialDiagnostics = $versionDirectories | Where-Object {
                                     test-path ($_.fullname + "\Diagnostics")
                                     }
                                 # now select the most recent module path which has diagnostics
@@ -302,7 +314,7 @@ param (
     }
     PROCESS
     {
-        Write-Progress -Activity "Inspecting Modules" -Status " "
+        Write-Progress -Activity 'Inspecting Modules' -Status ' '
         if ($PSBoundParameters.ContainsKey('Version'))
         {
             $moduleCollection = Get-ModuleList -Name $ModuleName -Version $Version
@@ -312,34 +324,60 @@ param (
             $moduleCollection = Get-ModuleList -Name $ModuleName
         }
 
-        $count = 1;
+        $count = 1
         $moduleCount = @($moduleCollection).Count
-        foreach($module in $moduleCollection)
+        foreach($modulePath in $moduleCollection)
         {
-            Write-Progress -Activity ("Searching for Diagnostics in " + $module) -PercentComplete ($count++/$moduleCount*100) -status " "
-            $diagnosticsDir = "$module\Diagnostics"
+            Write-Progress -Activity ("Searching for Diagnostics in $modulePath") -PercentComplete ($count++/$moduleCount*100) -status ' '
 
             # Get the module manifest so we can pull out the version
-            $moduleName = Split-Path -Path $module -Leaf
-            $manifestFile = Get-ChildItem -Path $module -Filter "$moduleName.psd1"
-            if (-not $manifestFile) {
-                # We may be in a "version" directory so get the actual module name from the parent directory
-                $parent = (Split-Path -Path $module -Parent).Name
-                $manifestFile = Get-ChildItem -Path $module -Filter "$parent.psd1"
+            $modName = Split-Path -Path $modulePath -Leaf
+            $versionedMod = $false
+            if ($modName -as [version]) {
+                $versionedMod = $true
+                # We may be in a 'version' directory so get the actual module name from the parent directory
+                $parentPath = Split-Path -Path $modulePath -Parent
+                write-verbose "looking in parent path $parentPath"
+                $modName = Split-Path -Path $parentPath -Leaf
             }
-            $manifest = Test-ModuleManifest -Path $manifestFile.FullName -Verbose:$false
 
-            if ( test-path -path $diagnosticsDir )
+            Write-Verbose $modName
+
+            $manifestFile = Get-ChildItem -Path $modulePath -Filter "$modName.psd1"
+            $manifest = $null
+            if ($manifestFile)
+            {
+                $manifest = Test-ModuleManifest -Path $manifestFile.FullName -Verbose:$false
+            }
+            # else
+            # {
+
+            #     # We may be in a 'version' directory so get the actual module name from the parent directory
+            #     $parentPath = Split-Path -Path $modulePath -Parent
+            #     write-verbose "looking in parent path $parentPath"
+            #     $modName = Split-Path -Path $parentPath -Leaf
+            #     $manifestFile = Get-ChildItem -Path $parentPath -Filter "$modName.psd1"
+            #     if ($manifestFile)
+            #     {
+            #         $manifest = Test-ModuleManifest -Path $manifestFile.FullName -Verbose:$false
+            #     }
+            #     else {
+            #         write-warning "couldn't file manifest $parentPath\$modName.psd1)"
+            #     }
+            # }
+
+            $diagnosticsDir = Join-Path -Path $modulePath -ChildPath 'Diagnostics'
+            if ( Test-Path -Path $diagnosticsDir )
             {
                 foreach($dir in $testType)
                 {
                     $testDir = Join-Path -Path $diagnosticsDir -ChildPath $dir
-                    write-verbose -Message "TEST DIR: $testDir"
-                    if ( ! (test-path -path $testDir) )
+                    Write-Verbose -Message "TEST DIR: $testDir"
+                    if ( -not (Test-Path -path $testDir) )
                     {
                         continue
                     }
-                    foreach($file in get-childitem -path $testDir -filter *.tests.ps1)
+                    foreach($file in Get-ChildItem -Path $testDir -Filter *.tests.ps1)
                     {
                         Write-Verbose -Message "PESTER TEST: $($file.fullname)"
 
@@ -352,15 +390,21 @@ param (
                             Write-Debug -Message "`n$($parameters.Keys | Out-String)"
                         }
 
-                        $testNames = @(Get-TestFromScript -ScriptPath $file.FullName)
-                        foreach ($testName in $testNames) {
+                        $tests = @(Get-TestFromScript -ScriptPath $file.FullName)
+                        foreach ($test in $tests)
+                        {
+                            # Only return tests that match the tag filter(s)
+                            if ($Tag -and @(Compare-Object -ReferenceObject $Tag -DifferenceObject $test.Tags -IncludeEqual -ExcludeDifferent).count -eq 0) { continue }
+                            if ($ExcludeTag -and @(Compare-Object -ReferenceObject $ExcludeTag -DifferenceObject $test.Tags -IncludeEqual -ExcludeDifferent).count -gt 0) { continue }
+
                             $modInfoParams = @{
                                 FilePath = $file.Fullname
                                 File = $file.Name
                                 Type = $dir
-                                Name = $testName
-                                ModuleName =  $Module
-                                Version =  [version]$manifest.Version
+                                Name = $test.Name
+                                ModuleName =  $modulePath
+                                Tags = $test.Tags
+                                Version = if ($manifest) { [version]$manifest.Version } else { $null }
                                 Parameters = $parameters
                             }
                             New-OperationValidationInfo @modInfoParams
@@ -420,6 +464,20 @@ param(
 Overrides the default parameter values:
 Invoke-OperationValidation -ModuleName MyModule -Overrides @{ SomeValue = 500; ExtraChecks = $true }
 
+.PARAMETER Tag
+Executes tests with specified tag parameter values. Wildcard characters and tag values that include spaces
+or whitespace characters are not supported.
+
+When you specify multiple tag values, Invoke-OperationValidation executes tests that have any of the
+listed tags. If you use both Tag and ExcludeTag, ExcludeTag takes precedence.
+
+.PARAMETER ExcludeTag
+Omits tests with the specified tag parameter values. Wildcard characters and tag values that include spaces
+or whitespace characters are not supported.
+
+When you specify multiple ExcludeTag values, Get-OperationValidation omits tests that have any
+of the listed tags. If you use both Tag and ExcludeTag, ExcludeTag takes precedence.
+
 .EXAMPLE
 PS> Get-OperationValidation -ModuleName OperationValidation | Invoke-OperationValidation -IncludePesterOutput
 Describing Simple Test Suite
@@ -466,7 +524,7 @@ function Invoke-OperationValidation
         [Parameter()][Version]$Version,
         [Parameter(ParameterSetName="FileAndTest")]
         [Parameter(ParameterSetName="UseGetOperationTest")]
-        [Parameter()][hashtable]$Overrides,        
+        [Parameter()][hashtable]$Overrides,
         [Parameter()][string[]]$Tag,
         [Parameter()][string[]]$ExcludeTag
         )
